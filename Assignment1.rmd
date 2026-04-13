@@ -1,0 +1,653 @@
+---
+title: "Assignment1"
+output: html_document
+date: "2026-04-11"
+---
+
+# Introduction
+
+Youth substance use is a prominent factor in today's society, as access to substances is easier for today's youth. The National Survey on Drug Use and Health (NSDUH) collects data in regards to this. In this project, I will explore factors correlated with youth substance use. Specifically, I will answer the question: which factors (both demographic and experienced) are impactful when predicting if a youth has used cigarettes, marajuana use, and past year alcohol usage?
+
+# Methodology
+
+In order to predict these variables, I will use binary classification, multi-class classification, and regression. I will also use decision trees, bagging, random forrest, and boosting in order to further define the best factors. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(tree)
+library(randomForest)
+library(gbm)
+```
+
+## Data Loading + Cleaning
+
+```{r}
+youth_data <- read.csv("~/DATA 5322 02 Statistical Machine Learning 2/Data/youth_data.csv")
+head(youth_data)
+cat("Dimensions for youth_data: ", dim(youth_data))
+# names(youth_data)
+```
+
+```{r}
+predictor_vars <- c(
+  "IRSEX", "NEWRACE2", "INCOME",
+  "PARCHKHW", "PARHLPHW", "PARLMTSN", "ARGUPAR",
+  "SCHFELT", "TCHGJOB", "AVGGRADE",
+  "STNDSCIG", "STNDSMJ", "STNDALC", "STNDDNK",
+  "PRCHORE2", "PRLMTTV2", "PRGDJOB2", "PRPROUD2",
+  "PRPKCIG2", "PRMJEVR2", "PRMJMO", "PRALDLY2",
+  "YFLPKCG2", "YFLTMRJ2", "YFLMJMO", "YFLADLY2",
+  "FRDPCIG2", "FRDMEVR2", "FRDMJMON", "FRDADLY2",
+  "TALKPROB", "PRTALK3", "PRBSOLV2", "PREVIOL2",
+  "PRVDRGO2", "GRPCNSL2", "PREGPGM2", "YTHACT2",
+  "DRPRVME3", "ANYEDUC3", "RLGATTD", "RLGIMPT",
+  "RLGDCSN", "RLGFRND"
+)
+
+target_vars <- c("TOBFLAG", "MRJMDAYS", "IRALCFY")
+
+keep_vars <- intersect(c(predictor_vars, target_vars), names(youth_data))
+dat <- youth_data %>% select(all_of(keep_vars)) %>% na.omit()
+cat("youth_data dimensions: ", dim(dat))
+```
+
+```{r}
+factor_predictors <- predictor_vars
+ordered_predictors <- c("INCOME")
+
+dat[factor_predictors] <- lapply(dat[factor_predictors], factor)
+dat[ordered_predictors] <- lapply(dat[ordered_predictors], ordered)
+
+dat$TOBFLAG <- factor(dat$TOBFLAG, levels = c(0,1), labels = c("No","Yes"))
+dat$MRJMDAYS <- factor(dat$MRJMDAYS)
+dat$IRALCFY <- as.numeric(dat$IRALCFY)
+
+str(dat[, c("TOBFLAG", "MRJMDAYS", "IRALCFY")])
+
+```
+
+I loaded the data "youth_data" provided in github. This dataset essentially takes the original NSDUH and cleans it. It implements filters to only included responses from youth under 18. It selects 79 variables and groups these variables into substance use, demographics, and youth experiences - and also converts the variables into the correct datatypes to help with modeling.
+
+I further broke down the variables into the "predictors" and "target variables" with the overall being 47 total variables. The definitions of each variable are found at the end of the report, in the Appendix section. I also removed NA's, bringing the total rows to 8273.
+
+Note: There was a little bit more data cleaning I needed to incorporate specifically: TOBFLAG to a "Yes"/"No" factor, MRJMDAYS as a factor, and IRALCFY as numeric. Also I needed to make the predictor variables factors. 
+
+Overall this will be our outcomes for each Model:
+
+- Binary Classification: TOBFLAG – Whether the respondent has ever used tobacco
+- Multi-Class: MRJMDAYS – Frequency category of marijuana use in the past month 
+- Regression: IRALCFY – Number of days alcohol was used in the past year
+
+# Modeling
+
+## 1. Binary Classification: Ever Used Tobacco (`TOBFLAG`)
+
+In the binary classification, we will use the TOBFLAG to determine which predictors are best suited for those who ever used tobacco. The method we will show is as follows:
+
+- Fit classification tree
+  - Plot and Evaluate Tree
+- Cross-Validate
+- Prune Tree
+- Boost Tree
+
+## Fit Classification Tree
+
+```{r}
+set.seed(1)
+sub_bin <- sample(1:nrow(dat), floor(0.7 * nrow(dat)))
+train_bin <- dat[sub_bin, ]
+test_bin <- dat[-sub_bin, ]
+```
+
+```{r}
+model_bin <- tree(TOBFLAG ~ . - MRJMDAYS - IRALCFY, data = train_bin)
+summary(model_bin)
+```
+
+The classification model selected the following variables:
+- peer approval of marijuana use (YFLMJMO)
+- perceived risk of marijuana (STNDSMJ)
+- perceived risk of alcohol (STNDALC). 
+
+The tree contained 4 terminal nodes and achieved a misclassification error rate of 9.7%
+
+### Plot and Inspect the Tree
+
+```{r}
+plot(model_bin)
+text(model_bin, pretty = 0)
+model_bin
+```
+
+
+### Evaluate the Unpruned Tree
+
+```{r}
+pred_bin <- predict(model_bin, test_bin, type = "class")
+table(pred_bin, test_bin$TOBFLAG)
+cat("Binary classification test error: ", mean(pred_bin != test_bin$TOBFLAG))
+cat("\nBinary classification test accuracy: ", mean(pred_bin == test_bin$TOBFLAG))
+```
+Our model has an accuracy approximately 90.2% on the test set. The structure of the tree shows that youth with lower peer approval of marijuana use and higher perceived risk of substances are less likely to have used tobacco. However, the model also only predicts "No" - which will cover a majority of the set. 
+
+## Cross-Validation and Pruning
+
+```{r}
+set.seed(1)
+cv_bin <- cv.tree(model_bin, FUN = prune.misclass)
+cv_bin
+plot(cv_bin$size, cv_bin$dev, type = "b",
+     xlab = "Tree Size", ylab = "CV Classification Error")
+best_size_bin <- cv_bin$size[which.min(cv_bin$dev)]
+best_size_bin
+```
+
+```{r}
+pruned_bin <- prune.misclass(model_bin, best = best_size_bin)
+plot(pruned_bin)
+text(pruned_bin, pretty = 0)
+
+pred_pruned_bin <- predict(pruned_bin, test_bin, type = "class")
+table(pred_pruned_bin, test_bin$TOBFLAG)
+
+cat("Unpruned test error: ", mean(pred_bin != test_bin$TOBFLAG), "\n")
+cat("Pruned test error: ", mean(pred_pruned_bin != test_bin$TOBFLAG), "\n")
+cat("Pruned test accuracy: ", mean(pred_pruned_bin == test_bin$TOBFLAG))
+```
+
+Similar to the chapter 8 notes, we move onto cross-validation to evaluate different tree sizes using misclassification error. The results showed that both a tree with 4 terminal nodes and a tree with 1 node produced the same misclassification error of 563. Though I considered the simpler model (1 node), I think using the 4-tree node was fine because there is only an error of 9.7% - and I wanted to continue to be able to interpret the nodes for this assignment.
+
+## Boosting for Binary Classification
+
+This follows the boosting style in Worksheet 2, using `gbm()` with a Bernoulli response. I tune the shrinkage parameter by comparing test error across several values.
+
+```{r}
+# Worksheet 2 was used as a reference
+
+train_bin_gbm <- train_bin
+test_bin_gbm <- test_bin
+
+train_bin_gbm$TOBFLAG01 <- ifelse(train_bin_gbm$TOBFLAG == "Yes", 1, 0)
+test_bin_gbm$TOBFLAG01 <- ifelse(test_bin_gbm$TOBFLAG == "Yes", 1, 0)
+
+shrink_vals <- c(0.001, 0.01, 0.05, 0.1)
+bin_err <- rep(NA, length(shrink_vals))
+
+for (i in 1:length(shrink_vals)) {
+  boost_bin <- gbm(
+    TOBFLAG01 ~ . - TOBFLAG - MRJMDAYS - IRALCFY,
+    data = train_bin_gbm,
+    distribution = "bernoulli",
+    n.trees = 1000,
+    shrinkage = shrink_vals[i],
+    interaction.depth = 3,
+    verbose = FALSE
+  )
+
+  boost_prob <- predict(boost_bin, test_bin_gbm, n.trees = 1000, type = "response")
+  boost_pred <- ifelse(boost_prob > 0.5, 1, 0)
+  bin_err[i] <- mean(boost_pred != test_bin_gbm$TOBFLAG01)
+}
+
+data.frame(shrinkage = shrink_vals, test_error = bin_err)
+plot(shrink_vals, bin_err, type = "b",
+     xlab = "Shrinkage", ylab = "Test Error",
+     main = "Boosting Tune: Binary Classification")
+best_shrink_bin <- shrink_vals[which.min(bin_err)]
+best_shrink_bin
+```
+
+```{r}
+boost_bin_final <- gbm(
+  TOBFLAG01 ~ . - TOBFLAG - MRJMDAYS - IRALCFY,
+  data = train_bin_gbm,
+  distribution = "bernoulli",
+  n.trees = 1000,
+  shrinkage = best_shrink_bin,
+  interaction.depth = 3,
+  verbose = FALSE
+)
+
+summary(boost_bin_final)
+
+boost_prob_final <- predict(boost_bin_final, test_bin_gbm, n.trees = 1000, type = "response")
+boost_pred_final <- ifelse(boost_prob_final > 0.5, 1, 0)
+
+cat("Boosting test error: ", mean(boost_pred_final != test_bin_gbm$TOBFLAG01), "\n")
+cat("Boosting test accuracy: ", mean(boost_pred_final == test_bin_gbm$TOBFLAG01))
+```
+
+Similar to worksheet 2, we applied boosting to improve the prediction of tobacco use by sequentially fitting multiple trees that focus on potentially misclassified observations. 
+
+The model had a test 0.0971 and accuracy of approximately 90.3% - this is pretty similar to our single decision tree. The variables that are most important were: peer approval of marijuana use (YFLMJMO), peer marijuana use (FRDMJMON), and race (NEWRACE2). STNDSMJ and STNDALC were also important. Overall - this first binary prediction suggests that tobacco usage has a lot to do with the peers surrounding a youth, and perceptions around marajuana use. This may suggest that marajuana is a gateway drug to tobacco as well.
+
+# 2. Multi-Class Classification: Marijuana Use Category (`MRJMDAYS`)
+
+This section uses a multi-class classification approach to predict marijuana use frequency (MRJMDAYS). This variable shows the frequency of category of marijuana use in the past month. The method we will use is as follows:
+
+- Fit multi-class tree
+  - Plot and Evaluate Tree
+- Random Forrest
+
+The predicting outcomes are broken into 5 categories:
+
+1 = 1–2 days of marijuana use (past month)
+2 = 3–5 days
+3 = 6–19 days
+4 = 20–30 days
+5 = Did NOT use marijuana in the past month
+
+## Train/Test Split
+
+```{r}
+set.seed(2)
+sub_multi <- sample(1:nrow(dat), floor(0.7 * nrow(dat)))
+train_multi <- dat[sub_multi, ]
+test_multi <- dat[-sub_multi, ]
+```
+
+## Fit Multi-Class Tree
+
+```{r}
+model_multi <- tree(MRJMDAYS ~ . - TOBFLAG - IRALCFY, data = train_multi)
+summary(model_multi)
+plot(model_multi)
+text(model_multi, pretty = 0)
+```
+
+We get a misclassification error rate of 7.98%, corresponding to an accuracy of approximately 92%. The most important predictors are: peer marijuana use (FRDMJMON), perceived risk (STNDSMJ), and parental disapproval (PRMJMO, PRMJEVR2) as key predictors.
+
+
+## Evaluate Multi-Class Tree
+
+```{r}
+pred_multi <- predict(model_multi, test_multi, type = "class")
+table(pred_multi, test_multi$MRJMDAYS)
+cat("Multi-class tree test error: ", mean(pred_multi != test_multi$MRJMDAYS), "\n")
+cat("Multi-class tree test accuracy: ", mean(pred_multi == test_multi$MRJMDAYS))
+```
+The multi-class decision tree achieved a test error of 7.61% and an accuracy of 92.39%, but the confusion matrix reveals that all predictions were classified as category 5. Similar to the binary, this shows that all of the defaulted predictors fall into class 5, indicating an imbalance (we can see that over 2000 of the actual fall into category 5 - non-user). Thus even though there is high accuracy, that is only because or model is predicting one category.
+
+## Tune and Fit Random Forest for Multi-Class Classification
+
+Following Worksheet 2, I compare several values of `mtry` and choose the one with the lowest test error.
+
+```{r}
+p_multi <- ncol(train_multi %>% select(-TOBFLAG, -MRJMDAYS, -IRALCFY))
+mtry_vals_multi <- c(3, floor(sqrt(p_multi)), floor(p_multi/3), p_multi)
+mtry_vals_multi <- unique(mtry_vals_multi)
+
+rf_multi_err <- rep(NA, length(mtry_vals_multi))
+
+for (i in 1:length(mtry_vals_multi)) {
+  rf_multi <- randomForest(
+    MRJMDAYS ~ . - TOBFLAG - IRALCFY,
+    data = train_multi,
+    mtry = mtry_vals_multi[i],
+    ntree = 300,
+    importance = TRUE
+  )
+
+  rf_multi_pred <- predict(rf_multi, test_multi)
+  rf_multi_err[i] <- mean(rf_multi_pred != test_multi$MRJMDAYS)
+}
+```
+
+```{r}
+data.frame(mtry = mtry_vals_multi, test_error = rf_multi_err)
+plot(mtry_vals_multi, rf_multi_err, type = "b",
+     xlab = "mtry", ylab = "Test Error",
+     main = "Random Forest Tune: Multi-Class")
+best_mtry_multi <- mtry_vals_multi[which.min(rf_multi_err)]
+best_mtry_multi
+```
+
+We see tha the lowest test error of 0.0761 at mtry = 3 and mtry = 6, matching the decision tree error of 7.61%. Performance slightly declined as mtry increased, with errors of 0.0770 at mtry = 14 and 0.0786 at mtry = 44. Thus fewer predictors at each tree split are better.
+
+```{r}
+rf_multi_final <- randomForest(
+  MRJMDAYS ~ . - TOBFLAG - IRALCFY,
+  data = train_multi,
+  mtry = best_mtry_multi,
+  ntree = 300,
+  importance = TRUE
+)
+
+rf_multi_pred_final <- predict(rf_multi_final, test_multi)
+table(rf_multi_pred_final, test_multi$MRJMDAYS)
+
+cat("Random forest multi-class test error: ", mean(rf_multi_pred_final != test_multi$MRJMDAYS), "\n")
+cat("Random forest multi-class test accuracy: ", mean(rf_multi_pred_final == test_multi$MRJMDAYS), "\n")
+
+importance(rf_multi_final)
+varImpPlot(rf_multi_final)
+```
+
+The random forest model achieved a test error of 7.53% and an accuracy of 92.47%, slightly outperforming the decision tree. However, the confusion matrix indicates that predictions are still dominated by the majority class (category 5 - non-users), suggesting ongoing class imbalance. Variable importance results highlight FRDMJMON, STNDSMJ, PRMJEVR2, and PRMJMO as key predictors, confirming that peer behavior, perceived risk, and parental attitudes are the most important factors influencing marijuana use frequency.
+
+# 3. Regression: Alcohol Frequency in Past Year (`IRALCFY`)
+
+Lastly, we will use regression to predict IRALCFY, which is the number of days alcohol was used in the past year. We will go through this as follows:
+
+- Fit Regression Tree
+- Bagging
+- Random Forrest
+
+## Train/Test Split
+
+```{r}
+# For the regression problem, I follow Worksheet 1 and Worksheet 2 by fitting a regression tree, then comparing bagging and random forest using test MSE.
+
+
+set.seed(3)
+sub_reg <- sample(1:nrow(dat), floor(0.7 * nrow(dat)))
+train_reg <- dat[sub_reg, ]
+test_reg <- dat[-sub_reg, ]
+```
+
+## Fit Regression Tree
+
+```{r}
+model_reg <- tree(IRALCFY ~ . - TOBFLAG - MRJMDAYS, data = train_reg)
+summary(model_reg)
+plot(model_reg)
+text(model_reg, pretty = 0)
+```
+
+## Evaluate Regression Tree
+
+```{r}
+pred_reg <- predict(model_reg, test_reg)
+tree_mse <- mean((pred_reg - test_reg$IRALCFY)^2)
+cat("Regression tree test MSE: ", tree_mse)
+```
+
+The model produced 4 terminal nodes, where the key predictors are STNDALC, YFLMJMO, and YFLTMRJ2. The residual mean deviance of 122000 and wide residual range (-915.4 to 590.5). The regression tree test MSE is also 119547.4. This means the model has a lot of prediction error - thus alcohol may not be predicted well with just this regression tree.
+
+
+## Bagging
+
+Following Worksheet 2, bagging is implemented with `randomForest()` using all predictors at each split.
+
+
+```{r}
+p_reg <- ncol(train_reg %>% select(-TOBFLAG, -MRJMDAYS, -IRALCFY))
+
+# Note: I chose 50 trees because it was taking a very long time to run
+
+bag_reg <- randomForest(
+  IRALCFY ~ . - TOBFLAG - MRJMDAYS,
+  data = train_reg,
+  mtry = p_reg,
+  ntree = 50,
+  importance = TRUE
+)
+```
+
+```{r}
+bag_pred <- predict(bag_reg, test_reg)
+bag_mse <- mean((bag_pred - test_reg$IRALCFY)^2)
+cat("Bagging test MSE: ", bag_mse)
+
+importance(bag_reg)
+varImpPlot(bag_reg)
+```
+
+We see that bagging has a test MSE of 120088.1, which is actually worse than the regression tree. This means that there isn't a lot of accuracy improvement from bagging. The most important predictor was STNDALC (21.33 %IncMSE). Other strong predictors are YFLMJMO (13.87) and YFLTMRJ2 (12.64).
+
+## Random Forest Regression with `mtry` Tuning
+
+```{r}
+mtry_vals_reg <- c(3, floor(sqrt(p_reg)), floor(p_reg/3), p_reg)
+mtry_vals_reg <- unique(mtry_vals_reg)
+
+rf_reg_mse <- rep(NA, length(mtry_vals_reg))
+
+for (i in 1:length(mtry_vals_reg)) {
+  rf_reg <- randomForest(
+    IRALCFY ~ . - TOBFLAG - MRJMDAYS,
+    data = train_reg,
+    mtry = mtry_vals_reg[i],
+    ntree = 50,
+    importance = TRUE
+  )
+
+  rf_reg_pred <- predict(rf_reg, test_reg)
+  rf_reg_mse[i] <- mean((rf_reg_pred - test_reg$IRALCFY)^2)
+}
+
+data.frame(mtry = mtry_vals_reg, test_mse = rf_reg_mse)
+plot(mtry_vals_reg, rf_reg_mse, type = "b",
+     xlab = "mtry", ylab = "Test MSE",
+     main = "Random Forest Tune: Regression")
+best_mtry_reg <- mtry_vals_reg[which.min(rf_reg_mse)]
+best_mtry_reg
+```
+
+```{r}
+rf_reg_final <- randomForest(
+  IRALCFY ~ . - TOBFLAG - MRJMDAYS,
+  data = train_reg,
+  mtry = best_mtry_reg,
+  ntree = 50,
+  importance = TRUE
+)
+
+rf_reg_pred_final <- predict(rf_reg_final, test_reg)
+rf_reg_final_mse <- mean((rf_reg_pred_final - test_reg$IRALCFY)^2)
+
+cat("Random forest regression test MSE: ", rf_reg_final_mse, "\n")
+
+importance(rf_reg_final)
+varImpPlot(rf_reg_final)
+```
+
+## Error by Number of Trees
+
+
+```{r}
+plot(rf_reg_final$mse, type = "l",
+     xlab = "Number of Trees",
+     ylab = "MSE",
+     main = "Random Forest Regression Error by Number of Trees")
+```
+
+The lowest test MSE is at mtry=3 with 113088.3 and a final MSE of 113058.8. This is better than both the regression tree and bagging models. Similar to bagging, as mtry increases, the performance becomes worse (thus smaller trees are better). The most important predictors are STNDALC (14.57), FLTMRJ2 (10.67), and FRDMJMON (10.30). Overall random forrest is the best.
+
+# Results
+
+```{r}
+comparison <- tibble(
+  Model = c(
+    "Binary tree",
+    "Pruned binary tree",
+    "Binary boosting",
+    "Multi-class tree",
+    "Multi-class random forest",
+    "Regression tree",
+    "Regression bagging",
+    "Regression random forest"
+  ),
+  Metric = c(
+    "Accuracy", "Accuracy", "Accuracy",
+    "Accuracy", "Accuracy",
+    "Test MSE", "Test MSE", "Test MSE"
+  ),
+  Value = c(
+    mean(pred_bin == test_bin$TOBFLAG),
+    mean(pred_pruned_bin == test_bin$TOBFLAG),
+    mean(boost_pred_final == test_bin_gbm$TOBFLAG01),
+    mean(pred_multi == test_multi$MRJMDAYS),
+    mean(rf_multi_pred_final == test_multi$MRJMDAYS),
+    tree_mse,
+    bag_mse,
+    rf_reg_final_mse
+  )
+)
+
+comparison
+```
+
+The performance of all models across binary classification, multi-class classification, and regression tasks is summarized in Table X.
+
+For binary classification, all models achieved similar performance. The decision tree and pruned tree both had an accuracy of 0.9021 (90.21%), while the boosting model achieved a slightly higher accuracy of 0.9029 (90.29%).
+
+For multi-class classification, the decision tree achieved an accuracy of 0.9239 (92.39%), while the random forest slightly improved performance with an accuracy of 0.9247 (92.47%).
+
+For regression, the random forest model produced the lowest test mean squared error (MSE = 113,052.8), outperforming both the regression tree (MSE = 119,547.4) and bagging (MSE = 120,088.1).
+
+Overall, classification models performed well with accuracies above 90%, while regression models showed higher variability in prediction error, with ensemble methods providing improved performance.
+
+All of the models for our 3 models are shown here. 
+
+The binary classification predicts whether a youth has used tobacco (TOBFLAG) and all models achieved similar performance. The decision tree and pruned tree both had an accuracy of 0.9021, while the boosting model achieved a slightly higher accuracy of 0.9029. That being said, all the models were similar and defaulted to predicting "No", where the majority of people fell under.
+
+The multi-class classification predicted the category of marajuana frequency in the past month (MRJMDAYS). the decision tree achieved an accuracy of 0.9239, while the random forest slightly improved performance with an accuracy of 0.9247. However, similar to the binary classification the model defaulted to predicting category 5 - non-users, where the majority of people fell under.
+
+The regression model predicted the number of days alcohol was used in the past year (IRALCFY). The random forest model produced the lowest test mean squared error (MSE = 113,052.8), outperforming both the regression tree (MSE = 119,547.4) and bagging (MSE = 120,088.1). However, none of these models predicted it very well.
+
+Overall, classification models performed well with accuracies above 90%, while regression models showed higher variability in prediction error.
+
+# Discussion
+
+Overall we can see that there are strengths and limitations for predicting substance use behavior with tree methods. Our models achieved high performance, but clearly we can see that when the data is skewed, it messes with our model (i.e. defaults to values where the majority of the values fall under).
+
+
+For the binary classification task (TOBFLAG), all models—including the classification tree, pruned tree, and boosting—achieved similar accuracy levels of approximately ~90%. In general this means that the underlying data is easy to capture, however because of the minimal improvement the ensemble method's didn't really do well predicting performance after the initial classification tree. We could see that this is because most of the predictions defaulted to "No".
+
+In the multi-class classification task (MRJMDAYS), the models achieved even higher accuracy, with the classification tree reaching 92.39% and the random forest slightly improving to 92.47%. Despite this strong performance, the confusion matrix revealed that the model predicted only a single class (category 5 - non-user) for all observations. Because this group accounts for the vast majority of the dataset, the model effectively defaulted to predicting the dominant class. Thus the accuracy is misleading as the data is imbalanced. 
+
+Lastly in the regression task (IRALCFY), the comparison between models showed clearer differences. The regression tree produced a test MSE of approximately 119,547, while bagging slightly increased the error to 120,088, suggesting limited benefit from aggregating trees in this case. In contrast, the random forest significantly improved performance, achieving the lowest test MSE of approximately 113,053. This essentially shows that randomness is feature selections can help reduce variance, especially when alchol prediction can be difficult to predict.
+
+Across all tasks, these results demonstrate that while ensemble methods like random forests can improve predictive performance—particularly for regression problems, we need to look deeper to make sure they aren't defaulting. Furthermore, the multi-class results emphasize the importance of evaluating models beyond overall accuracy, especially in imbalanced datasets. Lastly, analysis shows that simple models can perform competitively, but ensemble methods can provide improvements in certain settings though we need to be careful when we just look at a stat like MSE.
+
+# Appendix: Predictor Variable Definitions
+
+#### Predictor Variables
+
+Predictor Variables
+
+Demographics
+
+-IRSEX – Sex of respondent (male or female)
+
+-NEWRACE2 – Race/ethnicity category 
+
+-INCOME – Total family income level (categorical ranges)
+
+Parental Monitoring & Home Environment
+
+- PARCHKHW – How often parents check homework
+
+- PARHLPHW – How often parents help with homework
+
+- PARLMTSN – Whether parents limit going out on school nights
+
+- ARGUPAR – Frequency of arguments with parents
+
+School Experience & Performance
+
+- SCHFELT – Feelings about school (e.g., likes/dislikes school)
+
+- TCHGJOB – Perception of teachers doing a good job
+
+- AVGGRADE – Average grades in school
+
+Perceived Risk of Substance Use
+
+- STNDSCIG – Perceived risk of smoking cigarettes
+
+- STNDSMJ – Perceived risk of marijuana use
+
+- STNDALC – Perceived risk of alcohol use
+
+- STNDDNK – Perceived risk of heavy drinking
+
+Parental Involvement & Support
+
+- PRCHORE2 – Participation in chores assigned by parents
+
+- PRLMTTV2 – Parents limit TV or screen time
+
+- PRGDJOB2 – Parents acknowledge or reward good work
+
+- PRPROUD2 – Parents express pride in the respondent
+
+Parental Attitudes Toward Substance Use
+
+- PRPKCIG2 – Parents’ disapproval of cigarette use
+
+- PRMJEVR2 – Parents’ disapproval of ever using marijuana
+
+- PRMJMO – Parents’ disapproval of monthly marijuana use
+
+- PRALDLY2 – Parents’ disapproval of daily alcohol use
+
+Youth Attitudes Toward Substance Use
+
+- YFLPKCG2 – Youth perception of peer approval of cigarette use
+
+- YFLTMRJ2 – Youth perception of peer approval of trying marijuana
+
+- YFLMJMO – Youth perception of peer approval of regular marijuana use
+
+- YFLADLY2 – Youth perception of peer approval of daily alcohol use
+
+Peer Substance Use
+
+- FRDPCIG2 – Number of friends who smoke cigarettes
+
+- FRDMEVR2 – Number of friends who have used marijuana
+
+- FRDMJMON – Number of friends who use marijuana regularly
+
+- FRDADLY2 – Number of friends who drink alcohol regularly
+
+Communication & Behavioral Environment
+
+- TALKPROB – Whether the youth discusses problems with parents
+
+- PRTALK3 – Frequency of meaningful conversations with parents
+
+- PRBSOLV2 – Parents help solve problems
+
+- PREVIOL2 – Parental emphasis on avoiding violence
+
+Prevention & Support Programs
+
+- PRVDRGO2 – Exposure to drug prevention messages
+
+- GRPCNSL2 – Participation in group counseling
+
+- PREGPGM2 – Participation in prevention programs
+
+- YTHACT2 – Involvement in youth activities
+
+Drug Education & Awareness
+
+- DRPRVME3 – Exposure to drug prevention education
+
+- ANYEDUC3 – Participation in any substance use education program
+
+Religious Involvement
+
+- RLGATTD – Frequency of attending religious services
+
+- RLGIMPT – Importance of religion in respondent’s life
+
+- RLGDCSN – Influence of religion on decision-making
+
+- RLGFRND – Having friends with similar religious beliefs
+
+Target Variables (Outcomes)
+
+- TOBFLAG – Whether the respondent has ever used tobacco (binary: yes/no)
+
+- MRJMDAYS – Frequency category of marijuana use in the past month (multi-class)
+
+- IRALCFY – Number of days alcohol was used in the past year (numeric)
+
