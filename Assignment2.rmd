@@ -1,0 +1,421 @@
+---
+title: "Assignment2"
+output: html_document
+date: "2026-04-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this study, Support Vector Machines (SVMs) are used to classify whether an individual has been diagnosed with diabetes based on a set of demographic and behavioral variables using data from the National Health Interview Survey (NHIS).
+
+# Variables
+
+From codebook:
+
+- Demographics: AGE, SEX, EDUC, POVERTY
+- Health outcomes (targets):
+  - CANCEREV
+  - CHEARTDIEV
+  - DIABETICEV
+  - HEARTATTEV
+  - STROKEV
+- Behavior variables:
+  - Exercise: MOD10DMIN, VIG10DMIN
+  - Diet: FRUTNO, VEGENO, PIZZANO, SODAPNO
+  - Sleep: HRSLEEP
+  - Smoking: CIGDAYMO
+  
+Model to predict diabetes (DIABETICEV) because it is a common disease and has a strong relationship with lifestyle. 
+
+# Theoretical Background
+
+A Support Vector Machine (SVM) is a supervised learning method used for classification that identifies an optimal boundary (hyperplane) that separates classes. The objective is to maximize the margin between classes while allowing for some misclassification.
+
+The parameter C controls the tradeoff between maximizing the margin and minimizing classification error. Larger values of C penalize misclassification more heavily. SVMs can also incorporate kernel functions to model nonlinear relationships. The linear kernel produces a straight decision boundary, the polynomial kernel allows for curved boundaries controlled by the degree parameter, and the radial (RBF) kernel provides a flexible nonlinear boundary controlled by the gamma parameter. These kernels enable SVMs to capture varying levels of complexity in the data.
+
+# Data Cleaning
+
+```{r}
+library(tidyverse)
+library(caret)
+library(e1071)
+
+# Load data
+df <- read.csv("~/DATA 5322 02 Statistical Machine Learning 2/Data/nhis_2022.csv")
+
+invalid_codes <- c(7, 8, 9, 97, 98, 99, 997, 998, 999)
+
+df_clean <- df %>%
+  select(DIABETICEV, AGE, BMICALC, HRSLEEP, MOD10DMIN, SODAPNO) %>%
+  
+  # Replace invalid codes with NA
+  mutate(across(everything(), ~ ifelse(. %in% invalid_codes, NA, .))) %>%
+  
+  # Keep valid diabetes responses and filter people who's hours of sleep are less than 15
+  filter(DIABETICEV %in% c(1, 2)) %>%
+  filter(HRSLEEP <= 15) %>%
+
+  # Recode outcome
+  mutate(
+    diabetes = factor(ifelse(DIABETICEV == 2, "Yes", "No"))
+  ) %>%
+  # remove bad bmi
+  mutate(BMICALC = ifelse(BMICALC > 100, NA, BMICALC)) %>%
+  select(-DIABETICEV) %>%
+  na.omit()
+```
+
+The dataset was prepared and cleaned to ensure suitability for SVM classification. Relevant variables were selected, including diabetes status as the response and predictors such as age, BMI, sleep, physical activity, and soda consumption. Invalid survey codes (e.g., 97, 99, 999) were recoded as missing values and removed. Additional filters were applied to exclude unrealistic values (e.g., extreme BMI and sleep durations). The response variable was converted to a binary factor, and all predictors were scaled to ensure comparability across variables. Class imbalance in the training data was addressed through resampling to improve model performance.
+
+Target Variable: DIABETICEV
+Definition:“Ever told had diabetes”
+1 = No
+2 = Yes
+
+Demographic Variables
+- AGE: Respondent’s age in years
+- BMICALC: Body Mass Index (BMI) calculated from height and weight
+- HRSLEEP: Average hours of sleep per day
+- MOD10DMIN: Minutes of moderate physical activity (in sessions of at least 10 minutes)
+- SODAPNO: Frequency of soft drink (soda) consumption
+
+
+
+# Train/Test Split
+```{r}
+set.seed(123)
+
+train_index <- createDataPartition(df_clean$diabetes, p = 0.7, list = FALSE)
+
+train <- df_clean[train_index, ]
+test  <- df_clean[-train_index, ]
+```
+
+Split 70/30 into testing and training data.
+
+
+# Balance Data and Scale Data
+
+```{r}
+# balance training data only so that we don't overpredict based on the data imbalance
+train_balanced <- train %>%
+  group_by(diabetes) %>%
+  sample_n(min(table(train$diabetes))) %>%
+  ungroup()
+```
+
+```{r}
+preproc <- preProcess(train, method = c("center", "scale"))
+
+train_scaled <- predict(preproc, train_balanced)
+test_scaled  <- predict(preproc, test)
+```
+
+The training data were balanced using downsampling to address class imbalance and prevent the model from overpredicting the majority class. Predictor variables were then standardized using centering and scaling to ensure all features contributed equally to the SVM models.
+
+# Create Plots
+
+## Boxplots 
+
+```{r}
+library(tidyr)
+library(ggplot2)
+
+long_data <- train %>%
+  pivot_longer(
+    cols = c(AGE, BMICALC, HRSLEEP, MOD10DMIN, SODAPNO),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+ggplot(long_data, aes(x = diabetes, y = Value, fill = diabetes)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~ Variable, scales = "free") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Predictors by Diabetes Status",
+    x = "Diabetes",
+    y = "Value"
+  ) +
+  theme(legend.position = "none")
+
+ggplot(train, aes(x = MOD10DMIN, y = diabetes, color = diabetes)) +
+  geom_jitter(height = 0.15, alpha = 0.5) +
+  labs(
+    title = "BMI Distribution by Diabetes Status",
+    x = "BMI",
+    y = "Diabetes"
+  ) +
+  theme_minimal()
+```
+
+The results show that BMI exhibits the strongest separation, with individuals with diabetes generally having higher BMI values. Physical activity also shows some difference between groups, while sleep and soda consumption display substantial overlap, indicating weaker relationships with diabetes.
+
+## SVM Plots
+```{r}
+# choose the 5 variables you want to visualize
+vars <- c("AGE", "BMICALC", "HRSLEEP", "MOD10DMIN", "SODAPNO")
+
+# create all 2-variable combinations
+var_pairs <- combn(vars, 2, simplify = FALSE)
+
+# set plotting layout: adjust depending on how many plots you want per page
+par(mfrow = c(2, 2))
+
+for (pair in var_pairs) {
+  
+  # subset to response + chosen pair
+  plot_data <- train_scaled[, c("diabetes", pair)]
+  
+  # fit a 2-variable radial SVM
+  svm_plot <- svm(
+    diabetes ~ .,
+    data = plot_data,
+    kernel = "radial",
+    gamma = 0.1,
+    cost = 1,
+    scale = FALSE
+  )
+  
+  # plot with a custom title
+  plot(
+    svm_plot,
+    plot_data,
+    main = paste("Radial SVM:", pair[1], "vs", pair[2])
+  )
+}
+```
+
+The boundaries show some nonlinear structure, particularly for BMI and physical activity, but there remains significant overlap between classes. This explains why more flexible kernels provide only marginal improvements in predictive performance.
+
+# Train 3 SVM Models:
+
+## Linear
+
+```{r}
+library(e1071)
+
+set.seed(1)
+
+linear_tune <- tune(
+  svm,
+  diabetes ~ .,
+  data = train_scaled,
+  kernel = "linear",
+  ranges = list(
+    cost = c(0.01, 0.1, 1, 5, 10)
+  )
+)
+
+summary(linear_tune)
+```
+Lowest=0.2419
+- cost = 1
+
+```{r}
+linear_best <- linear_tune$best.model
+pred_linear_tuned <- predict(linear_best, newdata = test_scaled)
+
+confusionMatrix(pred_linear_tuned, test_scaled$diabetes)
+```
+
+The linear SVM model uses a straight decision boundary to separate the two classes. The model was tuned using cross-validation, and the optimal parameter was cost (C) = 1. The tuned linear model achieved an accuracy of 68.1%, a balanced accuracy of 0.7517, and a kappa of 0.2053. These results indicate that a simple linear boundary is sufficient to capture much of the structure in the data.
+
+## Polynomial
+
+```{r}
+set.seed(1)
+
+poly_tune <- tune(
+  svm,
+  diabetes ~ .,
+  data = train_scaled,
+  kernel = "polynomial",
+  ranges = list(
+    cost = c(0.01, 0.1, 1, 5, 10),
+    degree = c(2, 3, 4)
+  )
+)
+
+summary(poly_tune)
+```
+Lowest = 0.257:
+- cost=5 or 10
+- degree=2
+
+```{r}
+poly_best <- poly_tune$best.model
+pred_poly_tuned <- predict(poly_best, newdata = test_scaled)
+
+confusionMatrix(pred_poly_tuned, test_scaled$diabetes)
+```
+
+The polynomial SVM allows for curved decision boundaries, controlled by the degree parameter. Tuning identified the optimal parameters as cost = 5 (or 10) and degree = 2. The tuned polynomial model achieved an accuracy of 60.6%, a balanced accuracy of 0.7447, and a kappa of 0.1692. Despite increased flexibility, the model did not improve performance compared to the linear model, suggesting limited nonlinear structure in the data.
+
+## Radial
+
+```{r}
+set.seed(1)
+
+radial_tune <- tune(
+  svm,
+  diabetes ~ .,
+  data = train_scaled,
+  kernel = "radial",
+  ranges = list(
+    cost = c(0.01, 0.1, 1, 5, 10),
+    gamma = c(0.01, 0.1, 1)
+  )
+)
+
+summary(radial_tune)
+
+```
+Lowest error = 0.2463:
+- cost = 5 or 10
+- gamma = 0.01 or 0.10
+
+```{r}
+radial_best <- radial_tune$best.model
+pred_radial_tuned <- predict(radial_best, newdata = test_scaled)
+
+confusionMatrix(pred_radial_tuned, test_scaled$diabetes)
+```
+
+The radial (RBF) SVM is the most flexible model, capable of capturing complex nonlinear relationships through the gamma parameter. Tuning identified optimal values around cost = 5–10 and gamma = 0.01–0.1. The tuned radial model achieved an accuracy of 67.0%, a balanced accuracy of 0.7552, and a kappa of 0.2023, representing the best performance among the models. However, improvements over simpler models were minimal.
+
+## Results: Model Evaluation and Comparison
+
+```{r}
+## Model Evaluation
+
+pred_linear <- predict(linear_best, newdata = test_scaled)
+pred_poly   <- predict(poly_best, newdata = test_scaled)
+pred_radial <- predict(radial_best, newdata = test_scaled)
+
+cm_linear <- confusionMatrix(pred_linear, test_scaled$diabetes)
+cm_poly   <- confusionMatrix(pred_poly, test_scaled$diabetes)
+cm_radial <- confusionMatrix(pred_radial, test_scaled$diabetes)
+
+cat("SVM Linear: \n")
+cm_linear
+
+cat("\nSVM Polynomial: \n")
+cm_poly
+
+cat("\nSVM Radial: \n")
+cm_radial
+```
+
+Model performance was evaluated using a held-out test dataset and confusion matrices. Key metrics included accuracy, balanced accuracy, sensitivity, specificity, and Cohen’s kappa. Because the dataset is imbalanced, balanced accuracy was emphasized as a more appropriate measure of performance across both classes. The tuned linear SVM achieved an accuracy of 68.1%, a balanced accuracy of 0.7517, and a kappa of 0.2053. The polynomial SVM performed worse, with an accuracy of 60.6%, a balanced accuracy of 0.7447, and a kappa of 0.1692. The radial SVM achieved the best performance, with an accuracy of 67.0%, a balanced accuracy of 0.7552, and a kappa of 0.2023.
+
+Across all models, sensitivity ranged from approximately 0.58 to 0.66, while specificity ranged from approximately 0.84 to 0.91, indicating that the models were better at identifying non-diabetes cases than diabetes cases. Overall, all models demonstrated moderate predictive performance, with only small differences between kernels. The slightly better performance of the radial model suggests some nonlinear structure in the data, but the minimal improvement over the linear model indicates that increased model complexity provides limited benefit.
+
+
+# Appendix: Tables and Charts for Poster
+
+## Compare Models
+
+```{r}
+library(caret)
+library(dplyr)
+
+## Compare Models
+
+library(caret)
+library(dplyr)
+library(knitr)
+
+model_table <- data.frame(
+  Model = c("Linear", "Polynomial", "Radial"),
+  Accuracy = c(
+    cm_linear$overall["Accuracy"],
+    cm_poly$overall["Accuracy"],
+    cm_radial$overall["Accuracy"]
+  ),
+  Balanced_Accuracy = c(
+    cm_linear$byClass["Balanced Accuracy"],
+    cm_poly$byClass["Balanced Accuracy"],
+    cm_radial$byClass["Balanced Accuracy"]
+  ),
+  Kappa = c(
+    cm_linear$overall["Kappa"],
+    cm_poly$overall["Kappa"],
+    cm_radial$overall["Kappa"]
+  ),
+  Sensitivity = c(
+    cm_linear$byClass["Sensitivity"],
+    cm_poly$byClass["Sensitivity"],
+    cm_radial$byClass["Sensitivity"]
+  ),
+  Specificity = c(
+    cm_linear$byClass["Specificity"],
+    cm_poly$byClass["Specificity"],
+    cm_radial$byClass["Specificity"]
+  )
+) %>%
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+model_table
+
+kable(model_table, caption = "Comparison of Tuned SVM Models")
+```
+
+
+
+
+```{r}
+ggplot(model_table, aes(x = Model, y = Balanced_Accuracy, fill = Model)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = round(Balanced_Accuracy, 3)), 
+            vjust = -0.5, size = 5) +
+  coord_cartesian(ylim = c(0.73, 0.76)) +  # ✅ zoom without removing bars
+  scale_fill_manual(values = c("#4CAF50", "#2196F3", "#E53935")) +
+  labs(
+    title = "Balanced Accuracy by SVM Kernel",
+    x = "Model",
+    y = "Balanced Accuracy"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+```
+
+### BMI by diabetes status
+```{r}
+ggplot(train_scaled, aes(x = BMICALC, y = diabetes, color = diabetes)) +
+  geom_jitter(height = 0.15, alpha = 0.4) +
+  labs(
+    title = "BMI by Diabetes Status",
+    x = "BMI",
+    y = "Diabetes"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## Decision Boundary Plot
+
+```{r}
+library(e1071)
+
+plot_data <- train_scaled %>%
+  select(diabetes, BMICALC, MOD10DMIN)
+
+svm_plot <- svm(
+  diabetes ~ .,
+  data = plot_data,
+  kernel = "polynomial",
+  degree = 2,
+  cost = 1,
+  scale = FALSE
+)
+
+plot(svm_plot, plot_data, main = "Polynomial SVM Decision Boundary: BMI vs Moderate Activity")
+```
